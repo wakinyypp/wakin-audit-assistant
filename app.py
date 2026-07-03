@@ -1,78 +1,126 @@
 import streamlit as st
-import fitz
+import fitz  # PyMuPDF
+import pytesseract
+from PIL import Image
 import re
 
-st.set_page_config(page_title="AI审票系统V3", layout="wide")
+st.set_page_config(page_title="企业级AI审票系统", layout="wide")
 
-st.title("📊 wakin AI三单审计系统")
+st.title("📊 企业级AI审票系统（稳定版）")
 
-invoice = st.file_uploader("发票PDF", type=["pdf"])
-price_order = st.file_uploader("比价/申请单PDF", type=["pdf"])
-delivery = st.file_uploader("签收单PDF", type=["pdf"])
-
-
-def extract_text(file):
-    if file is None:
-        return ""
-
-    doc = fitz.open(stream=file.read(), filetype="pdf")
-    text = ""
-
-    for page in doc:
-        text += page.get_text()
-
+# ---------------- OCR ----------------
+def ocr_image(img):
+    text = pytesseract.image_to_string(img, lang="chi_sim+eng")
     return text
 
 
-def extract_numbers(text):
-    return [float(x) for x in re.findall(r"\d+\.?\d*", text)]
+def extract_pdf(file):
+    doc = fitz.open(stream=file.read(), filetype="pdf")
+    text = ""
+    for page in doc:
+        text += page.get_text()
+    return text
 
 
-def get_max(nums):
-    return max(nums) if nums else None
+# ---------------- 金额提取 ----------------
+def extract_amounts(text):
+    amounts = re.findall(r"(\d+\.?\d*)", text)
+    amounts = [float(a) for a in amounts if len(a) < 10]
+    return amounts
 
 
-if st.button("开始审票"):
+# ---------------- 单据解析 ----------------
+def analyze_documents(files):
+    results = {}
 
-    inv_text = extract_text(invoice)
-    po_text = extract_text(price_order)
-    del_text = extract_text(delivery)
+    for file in files:
+        name = file.name
 
-    inv_nums = extract_numbers(inv_text)
-    po_nums = extract_numbers(po_text)
-    del_nums = extract_numbers(del_text)
-
-    inv_max = get_max(inv_nums)
-    po_max = get_max(po_nums)
-    del_max = get_max(del_nums)
-
-    st.subheader("📌 审计结果")
-
-    st.write("发票最大金额:", inv_max)
-    st.write("比价/申请单最大金额:", po_max)
-    st.write("签收单最大数量:", del_max)
-
-    st.divider()
-
-    # 🔥 审计逻辑1：发票 vs 比价单
-    if inv_max and po_max:
-        if inv_max <= po_max:
-            st.success("✔ 发票未超预算（发票 ≤ 比价单）")
+        if name.endswith(".pdf"):
+            text = extract_pdf(file)
         else:
-            st.error("❌ 发票超预算（存在风险）")
+            img = Image.open(file)
+            text = ocr_image(img)
 
-    # 🔥 审计逻辑2：签收 vs 申请单
-    if del_max and po_max:
-        if del_max == po_max:
-            st.success("✔ 签收数量一致")
+        amounts = extract_amounts(text)
+
+        results[name] = {
+            "text": text,
+            "amounts": amounts,
+            "max_amount": max(amounts) if amounts else 0
+        }
+
+    return results
+
+
+# ---------------- 审核引擎（核心） ----------------
+def audit(results):
+
+    invoice = None
+    quote = None
+    request = None
+    delivery = None
+
+    for name, data in results.items():
+        if "发票" in name:
+            invoice = data
+        elif "比价" in name:
+            quote = data
+        elif "申请" in name:
+            request = data
+        elif "签收" in name:
+            delivery = data
+
+    report = []
+
+    # 发票 vs 申请单
+    if invoice and request:
+        if invoice["max_amount"] == request["max_amount"]:
+            report.append("✅ 发票与申请单金额一致")
         else:
-            st.warning("⚠ 签收数量不一致（可能少货/多货）")
+            report.append("❌ 发票与申请单金额不一致")
 
-    # 🔥 审计逻辑3：三单一致性检查
-    st.divider()
-
-    if inv_max and po_max and del_max:
-        if inv_max <= po_max and del_max == po_max:
-            st.success("🎉 三单一致，审计通过")
+    # 发票 vs 比价单
+    if invoice and quote:
+        if invoice["max_amount"] >= quote["max_amount"]:
+            report.append("⚠ 发票金额高于比价最低价（异常）")
         else:
-            st.error("🚨 三单存在不一致，需要复核")
+            report.append("✅ 发票在比价范围内")
+
+    # 签收单校验（你新增重点）
+    if invoice and delivery:
+        if invoice["amounts"] and delivery["amounts"]:
+            if len(invoice["amounts"]) == len(delivery["amounts"]):
+                report.append("✅ 签收数量与发票一致")
+            else:
+                report.append("❌ 签收数量与发票不一致")
+
+    return report
+
+
+# ---------------- UI ----------------
+uploaded_files = st.file_uploader(
+    "上传单据（发票/申请单/比价单/签收单）",
+    accept_multiple_files=True
+)
+
+if uploaded_files:
+
+    st.info("正在解析单据...")
+
+    results = analyze_documents(uploaded_files)
+
+    st.success("解析完成")
+
+    st.subheader("📄 审核结果")
+
+    report = audit(results)
+
+    for r in report:
+        st.write(r)
+
+    st.subheader("🔍 原始识别结果")
+
+    for k, v in results.items():
+        st.write("###", k)
+        st.text(v["text"][:1000])
