@@ -1,83 +1,67 @@
 import streamlit as st
-import fitz  # PyMuPDF
-import pytesseract
-from PIL import Image
-import io
+from pdf2image import convert_from_bytes
+from paddleocr import PaddleOCR
 import re
+from PIL import Image
+import numpy as np
 
-# 页面配置
-st.set_page_config(page_title="wakin的审票小助手", layout="wide")
+st.set_page_config(page_title="审票助手V2", layout="wide")
 
-st.title("📄 wakin的审票小助手")
-st.write("上传采购单 / 签收单 / 发票进行自动比对")
+st.title("📄 wakin AI审票助手（云端稳定版）")
 
-# 上传文件
-invoice_file = st.file_uploader("上传发票", type=["pdf"])
-order_file = st.file_uploader("上传申请单/比价单", type=["pdf"])
-delivery_file = st.file_uploader("上传签收单", type=["pdf"])
+invoice = st.file_uploader("发票", type=["pdf"])
+order = st.file_uploader("申请单", type=["pdf"])
+delivery = st.file_uploader("签收单", type=["pdf"])
 
-
-# PDF转图片（稳定版：PyMuPDF）
-def pdf_to_images(pdf_bytes):
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    images = []
-    for page in doc:
-        pix = page.get_pixmap(dpi=200)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        images.append(img)
-    return images
+ocr = PaddleOCR(use_angle_cls=True, lang="ch")
 
 
-# OCR识别
-def ocr_image(img):
-    text = pytesseract.image_to_string(img, lang="chi_sim+eng")
-    return text
+def pdf_to_text(file):
+    if file is None:
+        return ""
 
+    images = convert_from_bytes(file.read(), dpi=200)
 
-# 提取数字（金额/数量）
-def extract_numbers(text):
-    nums = re.findall(r"\d+\.?\d*", text)
-    return [float(n) for n in nums]
+    text_all = ""
 
-
-# 主逻辑
-def process(pdf_file):
-    if pdf_file is None:
-        return None, None
-
-    images = pdf_to_images(pdf_file.read())
-
-    full_text = ""
     for img in images:
-        full_text += ocr_image(img)
+        img = np.array(img)
+        result = ocr.ocr(img, cls=True)
 
-    numbers = extract_numbers(full_text)
+        for line in result[0]:
+            text_all += line[1][0] + "\n"
 
-    return full_text, numbers
+    return text_all
+
+
+def extract_numbers(text):
+    return re.findall(r"\d+\.?\d*", text)
 
 
 if st.button("开始审票"):
 
-    invoice_text, invoice_nums = process(invoice_file)
-    order_text, order_nums = process(order_file)
-    delivery_text, delivery_nums = process(delivery_file)
+    inv_text = pdf_to_text(invoice)
+    ord_text = pdf_to_text(order)
+    del_text = pdf_to_text(delivery)
+
+    inv_num = extract_numbers(inv_text)
+    ord_num = extract_numbers(ord_text)
+    del_num = extract_numbers(del_text)
 
     st.subheader("识别结果")
 
-    st.write("发票数字：", invoice_nums)
-    st.write("申请单数字：", order_nums)
-    st.write("签收单数字：", delivery_nums)
+    st.write("发票：", inv_num)
+    st.write("申请单：", ord_num)
+    st.write("签收单：", del_num)
 
-    # 简单对比逻辑
-    if invoice_nums and order_nums:
-        if max(invoice_nums) == max(order_nums):
-            st.success("✔ 发票与申请单金额一致")
+    if inv_num and ord_num:
+        if max(inv_num) == max(ord_num):
+            st.success("✔ 发票一致")
         else:
-            st.error("❌ 发票与申请单金额不一致")
+            st.error("❌ 发票不一致")
 
-    # 签收单校验（新增）
-    if delivery_nums and order_nums:
-        if max(delivery_nums) == max(order_nums):
-            st.success("✔ 签收单数量一致")
+    if del_num and ord_num:
+        if max(del_num) == max(ord_num):
+            st.success("✔ 签收单一致")
         else:
-            st.warning("⚠ 签收单与申请单可能不一致，请复核")
+            st.warning("⚠ 签收单不一致")
