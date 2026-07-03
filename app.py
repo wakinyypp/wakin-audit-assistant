@@ -1,61 +1,78 @@
 import streamlit as st
-import fitz  # PyMuPDF
+import fitz
 import re
 
-st.set_page_config(page_title="审票系统（稳定版）", layout="wide")
+st.set_page_config(page_title="AI审票系统V3", layout="wide")
 
-st.title("📄 wakin审票系统（云端稳定版）")
+st.title("📊 wakin AI三单审计系统")
 
 invoice = st.file_uploader("发票PDF", type=["pdf"])
-order = st.file_uploader("申请单PDF", type=["pdf"])
+price_order = st.file_uploader("比价/申请单PDF", type=["pdf"])
 delivery = st.file_uploader("签收单PDF", type=["pdf"])
 
 
-# ✅ 只提取PDF文字（不做OCR）
-def extract_text(pdf_file):
-    if pdf_file is None:
+def extract_text(file):
+    if file is None:
         return ""
 
-    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-
+    doc = fitz.open(stream=file.read(), filetype="pdf")
     text = ""
+
     for page in doc:
         text += page.get_text()
 
     return text
 
 
-# 提取数字
 def extract_numbers(text):
-    return re.findall(r"\d+\.?\d*", text)
+    return [float(x) for x in re.findall(r"\d+\.?\d*", text)]
+
+
+def get_max(nums):
+    return max(nums) if nums else None
 
 
 if st.button("开始审票"):
 
     inv_text = extract_text(invoice)
-    ord_text = extract_text(order)
+    po_text = extract_text(price_order)
     del_text = extract_text(delivery)
 
-    inv_num = extract_numbers(inv_text)
-    ord_num = extract_numbers(ord_text)
-    del_num = extract_numbers(del_text)
+    inv_nums = extract_numbers(inv_text)
+    po_nums = extract_numbers(po_text)
+    del_nums = extract_numbers(del_text)
 
-    st.subheader("识别结果")
+    inv_max = get_max(inv_nums)
+    po_max = get_max(po_nums)
+    del_max = get_max(del_nums)
 
-    st.write("发票数字：", inv_num)
-    st.write("申请单数字：", ord_num)
-    st.write("签收单数字：", del_num)
+    st.subheader("📌 审计结果")
 
-    # 发票 vs 申请单
-    if inv_num and ord_num:
-        if max(inv_num) == max(ord_num):
-            st.success("✔ 发票金额一致")
+    st.write("发票最大金额:", inv_max)
+    st.write("比价/申请单最大金额:", po_max)
+    st.write("签收单最大数量:", del_max)
+
+    st.divider()
+
+    # 🔥 审计逻辑1：发票 vs 比价单
+    if inv_max and po_max:
+        if inv_max <= po_max:
+            st.success("✔ 发票未超预算（发票 ≤ 比价单）")
         else:
-            st.error("❌ 发票金额不一致")
+            st.error("❌ 发票超预算（存在风险）")
 
-    # 签收单 vs 申请单
-    if del_num and ord_num:
-        if max(del_num) == max(ord_num):
-            st.success("✔ 签收单数量一致")
+    # 🔥 审计逻辑2：签收 vs 申请单
+    if del_max and po_max:
+        if del_max == po_max:
+            st.success("✔ 签收数量一致")
         else:
-            st.warning("⚠ 签收单不一致")
+            st.warning("⚠ 签收数量不一致（可能少货/多货）")
+
+    # 🔥 审计逻辑3：三单一致性检查
+    st.divider()
+
+    if inv_max and po_max and del_max:
+        if inv_max <= po_max and del_max == po_max:
+            st.success("🎉 三单一致，审计通过")
+        else:
+            st.error("🚨 三单存在不一致，需要复核")
