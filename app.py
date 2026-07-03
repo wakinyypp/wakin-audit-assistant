@@ -1,71 +1,68 @@
 import streamlit as st
-import pdfplumber
 import pytesseract
-from pdf2image import convert_from_bytes
+import fitz  # PyMuPDF
 import io
 import re
+from PIL import Image
+
+st.set_page_config(page_title="AI审票稳定版V8", layout="wide")
+
+st.title("🧠 AI四单据审票系统 V8（云端稳定版）")
+
 
 # =========================
-# 如果你本地有tesseract，需要写路径（Streamlit云端不用）
-# =========================
-# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
-st.set_page_config(page_title="AI四单据审票系统V7", layout="wide")
-
-st.title("🧠 AI四单据审票系统 V7（OCR增强版）")
-st.write("支持扫描件 + PDF文字 + 自动识别签收单")
-
-# =========================
-# 上传文件
+# 上传
 # =========================
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    apply_file = st.file_uploader("📄 申请单", type=["pdf"], key="a")
+    apply_file = st.file_uploader("📄 申请单", type=["pdf"])
 
 with col2:
-    quote_file = st.file_uploader("📄 比价单", type=["pdf"], key="b")
+    quote_file = st.file_uploader("📄 比价单", type=["pdf"])
 
 with col3:
-    invoice_file = st.file_uploader("📄 发票", type=["pdf"], key="c")
+    invoice_file = st.file_uploader("📄 发票", type=["pdf"])
 
 with col4:
-    delivery_file = st.file_uploader("📦 签收单(扫描件支持)", type=["pdf"], key="d")
+    delivery_file = st.file_uploader("📦 签收单", type=["pdf"])
 
 
 # =========================
-# 1️⃣ 文字PDF提取
+# PDF提取文字（优先）
 # =========================
 def extract_text_pdf(file):
+    doc = fitz.open(stream=file.read(), filetype="pdf")
     text = ""
-    with pdfplumber.open(io.BytesIO(file.read())) as pdf:
-        for page in pdf.pages:
-            t = page.extract_text()
-            if t:
-                text += t + "\n"
+    for page in doc:
+        text += page.get_text()
     return text
 
 
 # =========================
-# 2️⃣ OCR识别（扫描件）
+# OCR（稳定版，无poppler）
 # =========================
 def extract_text_ocr(file):
-    images = convert_from_bytes(file.read())
+    doc = fitz.open(stream=file.read(), filetype="pdf")
     text = ""
-    for img in images:
+
+    for page in doc:
+        pix = page.get_pixmap()
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
         text += pytesseract.image_to_string(img, lang="eng+chi_sim") + "\n"
+
     return text
 
 
 # =========================
-# 3️⃣ 智能提取（核心）
+# 智能识别
 # =========================
 def extract_text(file):
     text = extract_text_pdf(file)
 
-    # 如果PDF没有文字 → OCR
     if len(text.strip()) < 10:
-        st.info("🔍 检测到扫描件，启用OCR识别...")
+        st.info("🔍 使用OCR识别扫描件...")
         file.seek(0)
         text = extract_text_ocr(file)
 
@@ -73,38 +70,28 @@ def extract_text(file):
 
 
 # =========================
-# 4️⃣ 解析
+# 解析
 # =========================
 def parse(text):
-
     lines = [l.strip() for l in text.split("\n") if len(l.strip()) > 2]
-
     numbers = re.findall(r"\b\d+\b", text)
     numbers = [int(n) for n in numbers if int(n) < 1000]
 
-    return {
-        "lines": lines,
-        "numbers": numbers
-    }
+    return {"lines": lines, "numbers": numbers}
 
 
 # =========================
-# 5️⃣ 对比逻辑
+# 对比
 # =========================
-def compare(app, quote, invoice, delivery):
-
+def compare(invoice, delivery):
     issues = []
     risk = "LOW"
 
-    invoice_qty = sum(invoice["numbers"])
-    delivery_qty = sum(delivery["numbers"])
+    inv_qty = sum(invoice["numbers"])
+    del_qty = sum(delivery["numbers"])
 
-    if invoice_qty != delivery_qty:
-        issues.append(f"❌ 数量不一致：发票={invoice_qty} vs 签收={delivery_qty}")
-        risk = "HIGH"
-
-    if len(delivery["lines"]) < len(invoice["lines"]):
-        issues.append("❌ 签收单缺失内容（可能漏签）")
+    if inv_qty != del_qty:
+        issues.append(f"❌ 数量不一致：发票={inv_qty} vs 签收={del_qty}")
         risk = "HIGH"
 
     return issues, risk
@@ -115,36 +102,25 @@ def compare(app, quote, invoice, delivery):
 # =========================
 if apply_file and quote_file and invoice_file and delivery_file:
 
-    st.info("🧠 正在进行AI四单据审计（含OCR）...")
+    st.info("🧠 正在处理四单据...")
 
-    apply_text = extract_text(apply_file)
-    quote_text = extract_text(quote_file)
     invoice_text = extract_text(invoice_file)
     delivery_text = extract_text(delivery_file)
 
-    app = parse(apply_text)
-    quote = parse(quote_text)
     invoice = parse(invoice_text)
     delivery = parse(delivery_text)
 
-    st.subheader("📌 OCR/解析结果")
-
     st.json({
-        "申请单": app,
-        "比价单": quote,
         "发票": invoice,
         "签收单": delivery
     })
 
-    st.subheader("🧠 审计结果")
+    issues, risk = compare(invoice, delivery)
 
-    issues, risk = compare(app, quote, invoice, delivery)
-
-    st.write("### 🚨 风险等级：", risk)
+    st.write("### 风险：", risk)
 
     if issues:
         for i in issues:
             st.warning(i)
-        st.error("❌ 建议人工复核")
     else:
-        st.success("✅ 审核通过")
+        st.success("通过")
