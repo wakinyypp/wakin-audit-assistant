@@ -1,73 +1,88 @@
 import streamlit as st
 import pdfplumber
+import pytesseract
+from pdf2image import convert_from_bytes
 import re
 
-# 页面标题
-st.set_page_config(page_title="wakin的审票小助手")
+# =========================
+# 1. OCR路径（Windows本地必须）
+# =========================
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-st.title("🧠 wakin的审票小助手")
-st.write("上传采购单据（发票 / 申请单 / 比价单 / 签收单）进行自动审票")
+# =========================
+# 2. 页面设置
+# =========================
+st.set_page_config(page_title="wakin的审票小助手", layout="wide")
 
-# 上传文件
-uploaded_file = st.file_uploader("📤 上传PDF文件", type=["pdf"])
+st.title("📄 wakin的审票小助手")
+st.write("上传采购单（发票 / 申请单 / 比价单 / 签收单）自动检查是否有异常")
 
-# 提取PDF文本
-def extract_text(pdf_file):
+# =========================
+# 3. 文件上传
+# =========================
+uploaded_file = st.file_uploader("上传PDF文件", type=["pdf"])
+
+# =========================
+# 4. 提取PDF文本（优先文本，否则OCR）
+# =========================
+def extract_text(pdf_bytes):
     text = ""
-    with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
+
+    # ① 先尝试 pdfplumber（电子PDF）
+    try:
+        with pdfplumber.open(pdf_bytes) as pdf:
+            for page in pdf.pages:
+                t = page.extract_text()
+                if t:
+                    text += t + "\n"
+    except:
+        pass
+
+    # ② 如果没有文字 -> OCR扫描件
+    if not text.strip():
+        images = convert_from_bytes(pdf_bytes.read())
+        for img in images:
+            text += pytesseract.image_to_string(img, lang="chi_sim+eng")
+
     return text
 
-# 风控分析逻辑（简化版）
-def analyze(text):
+# =========================
+# 5. 简单规则检查（可扩展）
+# =========================
+def check_invoice(text):
     issues = []
-    risk = "low"
 
-    # 是否缺币种
-    if not any(currency in text for currency in ["USD", "CNY", "EUR", "HKD"]):
-        issues.append("❌ 发票可能缺少币种信息")
-        risk = "medium"
+    if "USD" not in text and "CNY" not in text and "EUR" not in text:
+        issues.append("⚠ 未发现币种信息")
 
-    # 是否缺型号（简单识别）
-    if not re.search(r"[A-Z]{2,}-?\d+", text):
-        issues.append("❌ 可能缺少标准型号信息")
-        risk = "medium"
+    if not re.search(r"\d{5,}", text):
+        issues.append("⚠ 可能缺少订单号/编号")
 
-    # 是否像发票
-    if "invoice" not in text.lower() and "发票" not in text:
-        issues.append("⚠️ 未识别到明显发票字段")
+    if len(text) < 50:
+        issues.append("⚠ 文本识别过少，可能OCR失败")
 
-    status = "pass" if len(issues) == 0 else "review"
+    return issues
 
-    return status, risk, issues
-
-
-# 主流程
+# =========================
+# 6. 主流程
+# =========================
 if uploaded_file:
 
-    st.subheader("📄 识别中...")
+    st.info("正在识别中，请稍等...")
 
+    file_bytes = uploaded_file.read()
     text = extract_text(uploaded_file)
 
-    st.text_area("📄 文本内容", text, height=250)
+    st.subheader("📌 识别结果")
+    st.text_area("文本内容", text, height=300)
 
-    if st.button("🧠 开始审票"):
+    st.subheader("🧠 审核结果")
 
-        status, risk, issues = analyze(text)
+    issues = check_invoice(text)
 
-        st.subheader("📊 审核结果")
-
-        if status == "pass":
-            st.success("✔ 审核通过")
-        else:
-            st.error("❌ 需要人工复核")
-
-        st.write("⚠️ 风险等级：", risk)
-
-        if issues:
-            st.write("### 问题列表：")
-            for i in issues:
-                st.write(i)
+    if issues:
+        for i in issues:
+            st.warning(i)
+        st.error("❌ 审核未通过，请检查单据")
+    else:
+        st.success("✅ 审核通过")
