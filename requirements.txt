@@ -1,5 +1,2 @@
 streamlit
-paddleocr
-pdf2image
-pillow
-numpy
+PyMuPDF
