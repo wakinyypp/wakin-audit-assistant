@@ -1,110 +1,142 @@
 import streamlit as st
 import pdfplumber
-import pytesseract
-from PIL import Image
 import io
 import re
 
 # =========================
-# 1. OCR路径（本地Windows用）
-# 云端会自动忽略，不影响运行
+# 页面设置
 # =========================
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+st.set_page_config(page_title="AI四单据审票系统V6", layout="wide")
+
+st.title("🧠 AI四单据审票系统 V6（修复数量误判版）")
+st.write("申请单 + 比价单 + 发票 + 签收单 一致性审计")
 
 # =========================
-# 2. 页面设置
+# 上传文件
 # =========================
-st.set_page_config(page_title="wakin的审票小助手", layout="wide")
+col1, col2, col3, col4 = st.columns(4)
 
-st.title("📄 wakin的审票小助手（云端稳定版）")
-st.write("上传PDF（发票 / 申请单 / 比价单 / 签收单）自动检查")
+with col1:
+    apply_file = st.file_uploader("📄 申请单", type=["pdf"], key="a")
+
+with col2:
+    quote_file = st.file_uploader("📄 比价单", type=["pdf"], key="b")
+
+with col3:
+    invoice_file = st.file_uploader("📄 发票", type=["pdf"], key="c")
+
+with col4:
+    delivery_file = st.file_uploader("📦 签收单", type=["pdf"], key="d")
+
 
 # =========================
-# 3. 上传文件
+# PDF解析
 # =========================
-uploaded_file = st.file_uploader("上传PDF文件", type=["pdf"])
-
-# =========================
-# 4. 稳定PDF解析（核心优化）
-# 👉 不使用 pdf2image！
-# =========================
-def extract_text(pdf_file):
+def extract_text(file):
     text = ""
-
-    # ① 先尝试文本型PDF
-    try:
-        with pdfplumber.open(pdf_file) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-    except Exception as e:
-        st.warning(f"PDF解析异常: {e}")
-
+    with pdfplumber.open(io.BytesIO(file.read())) as pdf:
+        for page in pdf.pages:
+            t = page.extract_text()
+            if t:
+                text += t + "\n"
     return text
 
 
 # =========================
-# 5. OCR备用（仅对“单页图片PDF”兜底）
+# 🔥 修复版结构化解析（关键）
 # =========================
-def simple_ocr_fallback(uploaded_file):
-    try:
-        images = Image.open(uploaded_file)
-        text = pytesseract.image_to_string(images, lang="chi_sim+eng")
-        return text
-    except:
-        return ""
+def parse(text):
+
+    lines = [l.strip() for l in text.split("\n") if len(l.strip()) > 2]
+
+    # 提取所有数字（用于数量判断）
+    numbers = re.findall(r"\b\d+\b", text)
+
+    numbers = [int(n) for n in numbers if int(n) < 1000]
+
+    return {
+        "lines": lines,
+        "numbers": numbers
+    }
 
 
 # =========================
-# 6. 审核逻辑（可扩展）
+# 🔥 修复版对比逻辑（关键）
 # =========================
-def check_invoice(text):
+def compare(app, quote, invoice, delivery):
+
     issues = []
+    risk = "LOW"
 
-    if "USD" not in text and "CNY" not in text and "EUR" not in text:
-        issues.append("⚠ 未发现币种信息")
+    # =========================
+    # 1️⃣ 数量对比（已修复）
+    # =========================
+    invoice_qty = sum(invoice["numbers"])
+    delivery_qty = sum(delivery["numbers"])
 
-    if not re.search(r"\d{5,}", text):
-        issues.append("⚠ 可能缺少订单/编号")
+    if invoice_qty != delivery_qty:
+        issues.append(f"❌ 数量不一致：发票={invoice_qty} vs 签收={delivery_qty}")
+        risk = "HIGH"
 
-    if len(text.strip()) < 30:
-        issues.append("⚠ 文本识别过少（可能是扫描件）")
+    # =========================
+    # 2️⃣ 行数辅助判断
+    # =========================
+    if len(delivery["lines"]) < len(invoice["lines"]):
+        issues.append("❌ 签收单内容少于发票（疑似漏签）")
+        risk = "HIGH"
 
-    return issues
+    # =========================
+    # 3️⃣ 申请 vs 发票
+    # =========================
+    if len(app["lines"]) > len(invoice["lines"]):
+        issues.append("⚠ 发票未完全覆盖申请单内容")
+        risk = "MEDIUM"
+
+    # =========================
+    # 4️⃣ 比价 vs 发票
+    # =========================
+    if len(quote["lines"]) > len(invoice["lines"]):
+        issues.append("⚠ 比价单与发票存在不一致")
+        risk = "MEDIUM"
+
+    return issues, risk
 
 
 # =========================
-# 7. 主流程
+# 主流程
 # =========================
-if uploaded_file:
+if apply_file and quote_file and invoice_file and delivery_file:
 
-    st.info("正在解析中，请稍等...")
+    st.info("🧠 正在进行四单据AI审计...")
 
-    # 读取文件（关键：只读一次）
-    file_bytes = uploaded_file.read()
+    apply_text = extract_text(apply_file)
+    quote_text = extract_text(quote_file)
+    invoice_text = extract_text(invoice_file)
+    delivery_text = extract_text(delivery_file)
 
-    # PDF文本提取
-    text = extract_text(io.BytesIO(file_bytes))
+    app = parse(apply_text)
+    quote = parse(quote_text)
+    invoice = parse(invoice_text)
+    delivery = parse(delivery_text)
 
-    # 如果文本为空 → OCR兜底
-    if not text.strip():
-        st.warning("检测为扫描件，启用OCR识别...")
-        text = simple_ocr_fallback(io.BytesIO(file_bytes))
+    st.subheader("📌 结构化结果")
 
-    # =========================
-    # 8. 展示结果
-    # =========================
-    st.subheader("📌 识别结果")
-    st.text_area("文本内容", text, height=300)
+    st.json({
+        "申请单": app,
+        "比价单": quote,
+        "发票": invoice,
+        "签收单": delivery
+    })
 
-    st.subheader("🧠 审核结果")
+    st.subheader("🧠 审计结果")
 
-    issues = check_invoice(text)
+    issues, risk = compare(app, quote, invoice, delivery)
+
+    st.write("### 🚨 风险等级：", risk)
 
     if issues:
         for i in issues:
             st.warning(i)
-        st.error("❌ 审核未通过")
+        st.error("❌ 建议人工复核")
     else:
-        st.success("✅ 审核通过")
+        st.success("✅ 四单据一致，审核通过")
